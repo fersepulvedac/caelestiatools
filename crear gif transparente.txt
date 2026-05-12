@@ -1,0 +1,25 @@
+1. Ir a la carpeta del GIF
+cd ~/Descargas
+2. Separar el GIF en frames PNG
+mkdir frames
+ffmpeg -i saltando.gif frames/frame_%04d.png
+3. Instalar rembg correctamente (solo una vez)
+Instalar pipx
+sudo pacman -S python-pipx
+Configurar pipx
+pipx ensurepath
+Reiniciar terminal
+
+Cerrar y volver a abrir foot.
+
+Instalar rembg con soporte CPU + CLI
+pipx install 'rembg[cpu,cli]'
+4. Crear carpeta output
+mkdir -p output
+5. Quitar fondo a TODOS los frames (fish shell)
+for f in (ls frames/*.png); echo "Procesando $f"; rembg i "$f" "output/"(basename "$f"); end
+6. Reconstruir GIF transparente REAL
+ffmpeg -framerate 30 -i output/frame_%04d.png -vf "split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse" saltando_transparente.gif
+
+Solo cambiar velocidad gift ya transparente
+ffmpeg -framerate 60 -i frames/frame_%04d.png -vf "split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse" gif_rapido.gif

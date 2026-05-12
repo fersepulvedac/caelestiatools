@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Atajos de Caelestia
+Comment=Ver binds de Hyprland y Caelestia
+Exec=python /home/fernando/proyectos/hyprapp/app.py
+Icon=preferences-desktop-keyboard-shortcuts
+Terminal=false
+Categories=Utility;GTK;
+StartupNotify=true
+StartupWMClass=com.hypr.bindviewer
