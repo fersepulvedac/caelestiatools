@@ -9,14 +9,22 @@ import subprocess
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
+gi.require_version("GdkPixbuf", "2.0")
 
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
 
 HYPR_CONFIG = os.path.expanduser("~/.config/hypr/hyprland.conf")
 CONFIG = os.path.expanduser("~/.config/hypr/hyprland/keybinds.conf")
 CAELESTIA_CONFIG = os.path.expanduser("~/.config/caelestia/shell.json")
 SCHEME_CONFIG = os.path.expanduser("~/.config/hypr/scheme/current.conf")
 SCHEME_DIR = os.path.dirname(SCHEME_CONFIG)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+SESSION_GIF_DIR = os.path.join(APP_DIR, "sessiongif")
+MEDIA_GIF_DIR = os.path.join(APP_DIR, "mediagif")
+SESSION_GIF_EXTENSIONS = (".gif",)
+PREVIEW_LOGICAL_W = 56
+PREVIEW_LOGICAL_H = 41
+PREVIEW_DECODE_SCALE = 3
 # Launcher note: this app is registered with
 # ~/.local/share/applications/com.hypr.bindviewer.desktop.
 # Keep that desktop entry updated instead of creating duplicate launchers.
@@ -141,6 +149,117 @@ window {
     background: alpha(@primary, 0.16);
     border-color: alpha(@primary, 0.52);
     color: @primary;
+}
+
+.session-gallery {
+    background: alpha(@surface_container, 0.72);
+    border: 1px solid alpha(@outline_variant, 0.58);
+    border-radius: 22px;
+    margin-bottom: 18px;
+    padding: 14px;
+}
+
+.session-gallery:last-child {
+    margin-bottom: 0;
+}
+
+.session-gallery-title {
+    color: @on_surface;
+    font-size: 16px;
+    font-weight: 800;
+}
+
+.session-gallery-copy {
+    color: @on_surface_variant;
+    font-size: 12px;
+}
+
+.tab-bar {
+    background: alpha(@surface_container, 0.78);
+    border: 1px solid alpha(@outline_variant, 0.55);
+    border-radius: 999px;
+    margin-bottom: 18px;
+    padding: 5px;
+}
+
+.tab-button {
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    color: @on_surface_variant;
+    font-size: 13px;
+    font-weight: 700;
+    min-height: 36px;
+    padding: 0 18px;
+    transition: background 160ms ease, color 160ms ease;
+}
+
+.tab-button:hover {
+    background: alpha(@primary, 0.10);
+    color: @on_surface;
+}
+
+.tab-button:checked {
+    background: linear-gradient(135deg, @primary, @tertiary);
+    color: @on_primary;
+    box-shadow: 0 6px 18px alpha(@primary, 0.32);
+}
+
+.tab-button:checked:hover {
+    background: linear-gradient(135deg, @primary, @tertiary);
+    color: @on_primary;
+}
+
+.tab-button image {
+    -gtk-icon-size: 16px;
+}
+
+.tab-stack {
+    background: transparent;
+}
+
+.tab-page {
+    background: transparent;
+}
+
+.session-gif-grid {
+    background: transparent;
+}
+
+.session-gif-card {
+    background: alpha(@surface_container_high, 0.68);
+    border: 1px solid alpha(@outline_variant, 0.62);
+    border-radius: 18px;
+    color: @on_surface;
+    min-width: 74px;
+    padding: 8px;
+}
+
+.session-gif-card:hover {
+    background: alpha(@primary, 0.14);
+    border-color: alpha(@primary, 0.52);
+}
+
+.session-gif-card.selected {
+    background: alpha(@primary, 0.22);
+    border-color: alpha(@primary, 0.86);
+}
+
+.session-gif-card.selected-media {
+    background: alpha(@tertiary, 0.18);
+    border-color: alpha(@tertiary, 0.72);
+}
+
+.session-gif-preview {
+    background: alpha(black, 0.16);
+    border-radius: 14px;
+    margin-bottom: 7px;
+}
+
+.session-gif-name {
+    color: @on_surface;
+    font-size: 12px;
+    font-weight: 700;
 }
 
 .search-box {
@@ -268,11 +387,17 @@ class BindViewer(Gtk.Application):
         self.scheme_dir_monitor = None
         self.theme_reload_source = None
         self.session_image_button = None
+        self.media_image_button = None
+        self.session_gif_buttons = {}
+        self.media_gif_buttons = {}
+        self.tab_stack = None
+        self.tab_buttons = {}
 
     def do_activate(self):
         self.install_css()
         self.watch_scheme()
         self.binds = self.load_binds()
+        os.makedirs(MEDIA_GIF_DIR, exist_ok=True)
 
         window = Gtk.ApplicationWindow(application=self)
         window.set_title("Atajos de Caelestia")
@@ -282,8 +407,8 @@ class BindViewer(Gtk.Application):
         shell.add_css_class("app-shell")
 
         shell.append(self.create_header())
-        shell.append(self.create_search())
-        shell.append(self.create_bind_list())
+        shell.append(self.create_tab_bar())
+        shell.append(self.create_tab_stack())
 
         window.set_child(shell)
         window.present()
@@ -364,6 +489,125 @@ class BindViewer(Gtk.Application):
 
         self.count_label = Gtk.Label()
         self.count_label.add_css_class("counter")
+        self.count_label.set_valign(Gtk.Align.CENTER)
+
+        heading.append(title)
+        heading.append(subtitle)
+        topbar.append(mark)
+        topbar.append(heading)
+        topbar.append(self.count_label)
+
+        self.update_count()
+        return topbar
+
+    def create_tab_bar(self):
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.add_css_class("tab-bar")
+        bar.set_halign(Gtk.Align.CENTER)
+
+        tabs = [
+            ("binds", "Atajos", "input-keyboard-symbolic"),
+            ("gifs", "GIFs", "image-x-generic-symbolic"),
+        ]
+
+        first_button = None
+        for tab_id, label, icon_name in tabs:
+            button = Gtk.ToggleButton()
+            button.add_css_class("tab-button")
+            button.set_hexpand(False)
+
+            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            icon = Gtk.Image.new_from_icon_name(icon_name)
+            text = Gtk.Label(label=label)
+            content.append(icon)
+            content.append(text)
+            button.set_child(content)
+
+            button.connect("toggled", self.on_tab_toggled, tab_id)
+            self.tab_buttons[tab_id] = button
+            bar.append(button)
+
+            if first_button is None:
+                first_button = button
+
+        if first_button is not None:
+            first_button.set_active(True)
+
+        return bar
+
+    def create_tab_stack(self):
+        self.tab_stack = Gtk.Stack()
+        self.tab_stack.add_css_class("tab-stack")
+        self.tab_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.tab_stack.set_transition_duration(180)
+        self.tab_stack.set_vexpand(True)
+
+        self.tab_stack.add_named(self.create_binds_page(), "binds")
+        self.tab_stack.add_named(self.create_gifs_page(), "gifs")
+        self.tab_stack.set_visible_child_name("binds")
+
+        return self.tab_stack
+
+    def create_binds_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        page.add_css_class("tab-page")
+        page.append(self.create_search())
+        page.append(self.create_bind_list())
+        return page
+
+    def create_gifs_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        page.add_css_class("tab-page")
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        content.append(self.create_session_gif_gallery())
+        content.append(self.create_media_gif_gallery())
+
+        scrolled.set_child(content)
+        page.append(scrolled)
+        return page
+
+    def on_tab_toggled(self, button, tab_id):
+        if not button.get_active():
+            other_active = any(
+                other_id != tab_id and other_button.get_active()
+                for other_id, other_button in self.tab_buttons.items()
+            )
+            if not other_active:
+                button.set_active(True)
+            return
+
+        for other_id, other_button in self.tab_buttons.items():
+            if other_id != tab_id and other_button.get_active():
+                other_button.set_active(False)
+
+        if self.tab_stack is not None:
+            self.tab_stack.set_visible_child_name(tab_id)
+
+    def create_session_gif_gallery(self):
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        section.add_css_class("session-gallery")
+
+        header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        header.set_hexpand(True)
+
+        title = Gtk.Label(label="GIFs para caelestia:session")
+        title.add_css_class("session-gallery-title")
+        title.set_xalign(0)
+
+        copy = Gtk.Label(label=f"Carga automaticamente los .gif desde {SESSION_GIF_DIR}")
+        copy.add_css_class("session-gallery-copy")
+        copy.set_xalign(0)
+        copy.set_ellipsize(Pango.EllipsizeMode.END)
+
+        header.append(title)
+        header.append(copy)
 
         self.session_image_button = Gtk.Button(label="Cambiar imagen")
         self.session_image_button.add_css_class("session-image-button")
@@ -371,15 +615,259 @@ class BindViewer(Gtk.Application):
         self.session_image_button.set_valign(Gtk.Align.CENTER)
         self.session_image_button.connect("clicked", self.on_change_session_image)
 
-        heading.append(title)
-        heading.append(subtitle)
-        topbar.append(mark)
-        topbar.append(heading)
-        topbar.append(self.session_image_button)
-        topbar.append(self.count_label)
+        header_row.append(header)
+        header_row.append(self.session_image_button)
+        section.append(header_row)
 
-        self.update_count()
-        return topbar
+        gifs = self.get_session_gifs()
+        if not gifs:
+            empty = Gtk.Label(label="Agrega GIFs en la carpeta sessiongif para verlos aqui.")
+            empty.add_css_class("session-gallery-copy")
+            empty.set_xalign(0)
+            section.append(empty)
+            return section
+
+        grid = Gtk.FlowBox()
+        grid.add_css_class("session-gif-grid")
+        grid.set_selection_mode(Gtk.SelectionMode.NONE)
+        grid.set_column_spacing(10)
+        grid.set_row_spacing(10)
+        grid.set_min_children_per_line(1)
+        grid.set_max_children_per_line(5)
+
+        current_path = os.path.realpath(self.get_current_session_gif())
+        self.session_gif_buttons = {}
+        for path in gifs:
+            grid.append(self.create_session_gif_card(path, current_path))
+
+        section.append(grid)
+        return section
+
+    def create_session_gif_card(self, path, current_path):
+        button = Gtk.Button()
+        button.add_css_class("session-gif-card")
+        button.set_tooltip_text(path)
+        button.connect("clicked", self.on_session_gif_clicked, path)
+
+        if os.path.realpath(path) == current_path:
+            button.add_css_class("selected")
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        preview = self.create_gif_preview(path)
+
+        name = Gtk.Label(label=self.get_session_gif_label(path))
+        name.add_css_class("session-gif-name")
+        name.set_ellipsize(Pango.EllipsizeMode.END)
+        name.set_max_width_chars(14)
+
+        content.append(preview)
+        content.append(name)
+        button.set_child(content)
+
+        self.session_gif_buttons[path] = button
+        return button
+
+    def create_gif_preview(self, path):
+        preview = Gtk.Picture()
+        preview.add_css_class("session-gif-preview")
+        preview.set_size_request(PREVIEW_LOGICAL_W, PREVIEW_LOGICAL_H)
+        preview.set_can_shrink(True)
+        preview.set_content_fit(Gtk.ContentFit.CONTAIN)
+
+        decode_w = max(1, PREVIEW_LOGICAL_W * PREVIEW_DECODE_SCALE)
+        decode_h = max(1, PREVIEW_LOGICAL_H * PREVIEW_DECODE_SCALE)
+
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                path, decode_w, decode_h, True
+            )
+            preview.set_paintable(Gdk.Texture.new_for_pixbuf(pixbuf))
+        except GLib.Error:
+            fallback = Gtk.Image.new_from_icon_name("image-missing-symbolic")
+            fallback.add_css_class("session-gif-preview")
+            fallback.set_size_request(PREVIEW_LOGICAL_W, PREVIEW_LOGICAL_H)
+            fallback.set_pixel_size(24)
+            return fallback
+
+        return preview
+
+    def create_media_gif_gallery(self):
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        section.add_css_class("session-gallery")
+
+        header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        header.set_hexpand(True)
+
+        title = Gtk.Label(label="GIFs para dashboard media (bongo cat)")
+        title.add_css_class("session-gallery-title")
+        title.set_xalign(0)
+
+        copy = Gtk.Label(
+            label=(
+                "GIFs pensados para el dashboard media (velocidad distinta a session). "
+                f"Carpeta: {MEDIA_GIF_DIR}"
+            )
+        )
+        copy.add_css_class("session-gallery-copy")
+        copy.set_xalign(0)
+        copy.set_wrap(True)
+
+        header.append(title)
+        header.append(copy)
+
+        self.media_image_button = Gtk.Button(label="Cambiar media")
+        self.media_image_button.add_css_class("session-image-button")
+        self.media_image_button.set_tooltip_text("Cambiar GIF del dashboard media (bongo cat)")
+        self.media_image_button.set_valign(Gtk.Align.CENTER)
+        self.media_image_button.connect("clicked", self.on_change_media_image)
+
+        header_row.append(header)
+        header_row.append(self.media_image_button)
+        section.append(header_row)
+
+        gifs = self.get_media_gifs()
+        if not gifs:
+            empty = Gtk.Label(
+                label="Agrega archivos .gif en la carpeta mediagif para verlos aqui."
+            )
+            empty.add_css_class("session-gallery-copy")
+            empty.set_xalign(0)
+            section.append(empty)
+            return section
+
+        grid = Gtk.FlowBox()
+        grid.add_css_class("session-gif-grid")
+        grid.set_selection_mode(Gtk.SelectionMode.NONE)
+        grid.set_column_spacing(10)
+        grid.set_row_spacing(10)
+        grid.set_min_children_per_line(1)
+        grid.set_max_children_per_line(5)
+
+        current_path = os.path.realpath(self.get_current_media_gif())
+        self.media_gif_buttons = {}
+        for path in gifs:
+            grid.append(self.create_media_gif_card(path, current_path))
+
+        section.append(grid)
+        return section
+
+    def create_media_gif_card(self, path, current_path):
+        button = Gtk.Button()
+        button.add_css_class("session-gif-card")
+        button.set_tooltip_text(path)
+        button.connect("clicked", self.on_media_gif_clicked, path)
+
+        if os.path.realpath(path) == current_path:
+            button.add_css_class("selected-media")
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        preview = self.create_gif_preview(path)
+
+        name = Gtk.Label(label=self.get_session_gif_label(path))
+        name.add_css_class("session-gif-name")
+        name.set_ellipsize(Pango.EllipsizeMode.END)
+        name.set_max_width_chars(14)
+
+        content.append(preview)
+        content.append(name)
+        button.set_child(content)
+
+        self.media_gif_buttons[path] = button
+        return button
+
+    def get_media_gifs(self):
+        return self.list_gif_paths(MEDIA_GIF_DIR)
+
+    def get_current_media_gif(self):
+        if not os.path.exists(CAELESTIA_CONFIG):
+            return ""
+
+        try:
+            with open(CAELESTIA_CONFIG, "r", encoding="utf-8") as file:
+                config = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return ""
+
+        return config.get("paths", {}).get("mediaGif", "")
+
+    def list_gif_paths(self, directory):
+        if not os.path.isdir(directory):
+            return []
+
+        paths = []
+        for name in os.listdir(directory):
+            if name.lower().endswith(SESSION_GIF_EXTENSIONS):
+                path = os.path.join(directory, name)
+                if os.path.isfile(path):
+                    paths.append(path)
+
+        return sorted(paths, key=lambda path: os.path.basename(path).lower())
+
+    def get_session_gifs(self):
+        return self.list_gif_paths(SESSION_GIF_DIR)
+
+    def get_session_gif_label(self, path):
+        name = os.path.basename(path)
+        label, _extension = os.path.splitext(name)
+        return label
+
+    def get_current_session_gif(self):
+        if not os.path.exists(CAELESTIA_CONFIG):
+            return ""
+
+        try:
+            with open(CAELESTIA_CONFIG, "r", encoding="utf-8") as file:
+                config = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return ""
+
+        return config.get("paths", {}).get("sessionGif", "")
+
+    def on_session_gif_clicked(self, _button, path):
+        try:
+            self.set_session_gif(path)
+        except (OSError, json.JSONDecodeError):
+            if self.session_image_button is not None:
+                self.flash_session_image_button(self.session_image_button, "No se pudo guardar")
+            return
+
+        self.update_session_gif_selection(path)
+        if self.session_image_button is not None:
+            self.flash_session_image_button(self.session_image_button, "GIF actualizado")
+
+    def update_session_gif_selection(self, selected_path):
+        selected_path = os.path.realpath(selected_path)
+
+        for path, button in self.session_gif_buttons.items():
+            if os.path.realpath(path) == selected_path:
+                button.add_css_class("selected")
+            else:
+                button.remove_css_class("selected")
+
+    def on_media_gif_clicked(self, _button, path):
+        try:
+            self.set_media_gif(path)
+        except (OSError, json.JSONDecodeError):
+            if self.media_image_button is not None:
+                self.flash_media_image_button(self.media_image_button, "No se pudo guardar")
+            return
+
+        self.update_media_gif_selection(path)
+        if self.media_image_button is not None:
+            self.flash_media_image_button(self.media_image_button, "Media actualizado")
+
+    def update_media_gif_selection(self, selected_path):
+        selected_path = os.path.realpath(selected_path)
+
+        for path, button in self.media_gif_buttons.items():
+            if os.path.realpath(path) == selected_path:
+                button.add_css_class("selected-media")
+            else:
+                button.remove_css_class("selected-media")
 
     def create_search(self):
         search = Gtk.SearchEntry()
@@ -543,6 +1031,32 @@ class BindViewer(Gtk.Application):
         dialog.connect("response", self.on_session_image_selected, button)
         dialog.show()
 
+    def on_change_media_image(self, button):
+        dialog = Gtk.FileChooserNative(
+            title="Elegir GIF para dashboard media",
+            transient_for=self.get_active_window(),
+            action=Gtk.FileChooserAction.OPEN,
+            accept_label="Usar GIF",
+            cancel_label="Cancelar",
+        )
+
+        image_filter = Gtk.FileFilter()
+        image_filter.set_name("Imagenes y GIFs")
+        image_filter.add_mime_type("image/gif")
+        image_filter.add_mime_type("image/png")
+        image_filter.add_mime_type("image/jpeg")
+        image_filter.add_mime_type("image/webp")
+        dialog.add_filter(image_filter)
+
+        folder = Gio.File.new_for_path(MEDIA_GIF_DIR)
+        try:
+            dialog.set_current_folder(folder)
+        except GLib.Error:
+            pass
+
+        dialog.connect("response", self.on_media_image_selected, button)
+        dialog.show()
+
     def on_session_image_selected(self, dialog, response, button):
         try:
             if response != Gtk.ResponseType.ACCEPT:
@@ -557,9 +1071,31 @@ class BindViewer(Gtk.Application):
                 return
 
             self.set_session_gif(path)
+            self.update_session_gif_selection(path)
             self.flash_session_image_button(button, "Imagen actualizada")
         except (OSError, json.JSONDecodeError):
             self.flash_session_image_button(button, "No se pudo guardar")
+        finally:
+            dialog.destroy()
+
+    def on_media_image_selected(self, dialog, response, button):
+        try:
+            if response != Gtk.ResponseType.ACCEPT:
+                return
+
+            file = dialog.get_file()
+            if file is None:
+                return
+
+            path = file.get_path()
+            if not path:
+                return
+
+            self.set_media_gif(path)
+            self.update_media_gif_selection(path)
+            self.flash_media_image_button(button, "Media actualizado")
+        except (OSError, json.JSONDecodeError):
+            self.flash_media_image_button(button, "No se pudo guardar")
         finally:
             dialog.destroy()
 
@@ -577,12 +1113,34 @@ class BindViewer(Gtk.Application):
             json.dump(config, file, indent=4)
             file.write("\n")
 
+    def set_media_gif(self, path):
+        config = {}
+
+        if os.path.exists(CAELESTIA_CONFIG):
+            with open(CAELESTIA_CONFIG, "r", encoding="utf-8") as file:
+                config = json.load(file)
+
+        config.setdefault("paths", {})["mediaGif"] = path
+
+        os.makedirs(os.path.dirname(CAELESTIA_CONFIG), exist_ok=True)
+        with open(CAELESTIA_CONFIG, "w", encoding="utf-8") as file:
+            json.dump(config, file, indent=4)
+            file.write("\n")
+
     def flash_session_image_button(self, button, label):
         button.set_label(label)
         GLib.timeout_add(1600, self.reset_session_image_button, button)
 
     def reset_session_image_button(self, button):
         button.set_label("Cambiar imagen")
+        return GLib.SOURCE_REMOVE
+
+    def flash_media_image_button(self, button, label):
+        button.set_label(label)
+        GLib.timeout_add(1600, self.reset_media_image_button, button)
+
+    def reset_media_image_button(self, button):
+        button.set_label("Cambiar media")
         return GLib.SOURCE_REMOVE
 
     def update_count(self):
